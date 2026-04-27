@@ -1,0 +1,87 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Distributed Fuzzy Search Stack
+#  redis        – Celery broker + result backend
+#  worker       – Celery workers (scale with --scale worker=N)
+#  flower       – Celery monitoring UI  (http://localhost:5555)
+#  api          – FastAPI server        (http://localhost:8000)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >
+      celery -A tasks.tasks worker
+        --loglevel=info
+        --concurrency=4
+        --queues=celery
+        --hostname=worker@%h
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - ./data:/data:ro       # mount large text files here
+    deploy:
+      replicas: 4             # start 4 workers; override with --scale worker=N
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1G
+
+  flower:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >
+      celery -A tasks.tasks flower
+        --port=5555
+        --broker=redis://redis:6379/0
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python server.py
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - ./data:/data:ro
+
+volumes:
+  redis_data:
